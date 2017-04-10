@@ -39,6 +39,7 @@
       A changelog provider with parameters (separated by comma).
       Currently supported:
       - github: "gh,owner,repository" (e.g. "gh,openstack,oslo.config")
+      - none: "none," (e.g. "none,")
     </description>
   </parameter>
   <parameter name="changelog-email">

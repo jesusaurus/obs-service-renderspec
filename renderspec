@@ -68,6 +68,8 @@ def _get_changelog(changelog_provider, v_old, v_new):
         if provider == 'gh':
             owner, repo = params.split(',', 2)
             changes = _get_changelog_github(owner, repo, v_old, v_new)
+        elif provider == 'none':
+            changes = []
         else:
             raise Exception("Invalid changelog-provider '%s'" % (provider))
     return changes
@@ -229,7 +231,7 @@ if __name__ == '__main__':
            os.path.exists(changes_file):
             print("Version changed: '%s' -> '%s'"
                   % (old_spec_version, new_spec_version))
-            changes = ['update to version %s:' % new_spec_version]
+            changes = ['update to version %s' % new_spec_version]
             changes_new_version = _get_changelog(
                 args['changelog_provider'], old_spec_version, new_spec_version)
             changes.append(changes_new_version)
