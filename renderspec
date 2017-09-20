@@ -19,16 +19,20 @@ from __future__ import unicode_literals
 
 import argparse
 from contextlib import closing
+from contextlib import contextmanager
 from datetime import datetime
 import io
+import json
 import os
 import re
 import shutil
 import six
 import subprocess
 import sys
+import tarfile
 import tempfile
 import requests
+import zipfile
 from six.moves import filter
 
 
@@ -36,6 +40,52 @@ RPMSPEC_BIN = "/usr/bin/rpmspec"
 OSC_BIN = "/usr/bin/osc"
 GITHUB_CHANGES = ("https://api.github.com/repos/%(owner)s/%(repo)s/"
                   "compare/%(v1)s...%(v2)s")
+
+
+@contextmanager
+def _extract_archive_to_tempdir(archive_filename):
+    """extract the given tarball or zipfile to a tempdir.
+    Delete the tempdir at the end"""
+    if not os.path.exists(archive_filename):
+        raise Exception("Archive '%s' does not exist" % (archive_filename))
+
+    tempdir = tempfile.mkdtemp(prefix="obs-service-renderspec_")
+    try:
+        if tarfile.is_tarfile(archive_filename):
+            with tarfile.open(archive_filename) as f:
+                f.extractall(tempdir)
+        elif zipfile.is_zipfile(archive_filename):
+            with zipfile.ZipFile(archive_filename) as f:
+                f.extractall(tempdir)
+        else:
+            raise Exception("Can not extract '%s'. "
+                            "Not a tar or zip file" % archive_filename)
+        yield tempdir
+    finally:
+        shutil.rmtree(tempdir)
+
+
+def _find_pbr_json(directory):
+    """find and return the full path to a pbr.json file or None if not found"""
+    for root, dirs, files in os.walk(directory):
+        for filename in files:
+            if filename == 'pbr.json':
+                return os.path.join(root, filename)
+    # no pbr.json file found
+    return None
+
+
+def _find_archives(directories, basename):
+    """return a list of archives in the given directories
+    or an empty list if no archive(s) can be found"""
+    if isinstance(directories, six.string_types):
+        directories = [directories]
+
+    return sorted(
+        [os.path.join(d, f) for d in directories if d for f in os.listdir(d)
+         if f.startswith(basename) and
+         f.endswith(('tar.gz', 'zip', 'tar.bz2', 'xz'))],
+        key=lambda x: os.stat(x).st_mtime, reverse=True)
 
 
 def _get_changelog_github(owner, repo, v1, v2):
@@ -108,7 +158,19 @@ def _prepend_string_to_file(string, filename):
         f.write(new)
 
 
-def _get_spec_version(specfile):
+def _get_version_from_pbr_json(archive_filename):
+    """returns a git version sha or None if not found"""
+    with _extract_archive_to_tempdir(archive_filename) as directory:
+        pbr_json_file = _find_pbr_json(directory)
+        if pbr_json_file:
+            with open(pbr_json_file, 'r') as pbr_file:
+                pbr_data = json.load(pbr_file)
+                if 'git_version' in pbr_data and pbr_data['git_version']:
+                    return pbr_data['git_version']
+    return None
+
+
+def _get_version_from_spec(specfile):
     """get a single version from the given .spec file"""
     if not os.path.exists(specfile):
         # maybe this is the initial convertion.
@@ -116,6 +178,24 @@ def _get_spec_version(specfile):
     version = subprocess.check_output(
         [RPMSPEC_BIN, '-q', '--queryformat', '%{VERSION}\n', specfile])
     return list(set(filter(None, version.decode("utf-8").split('\n'))))[0]
+
+
+def _get_version(input_filename, output_filename):
+    """return the version from pbr (or None) and the version from the
+    .spec file (or None) in a tuple"""
+    version_pbr = None
+    version_spec = None
+    # 1) try to get the version from the tarball
+    basename = re.sub('.spec.j2$', '', os.path.basename(input_filename))
+    archives = _find_archives(['.'], basename)
+    for archive in archives:
+        version = _get_version_from_pbr_json(archive)
+        if version:
+            version_pbr = version
+            break
+    # 2) try to get version from spec
+    version_spec = _get_version_from_spec(output_filename)
+    return version_pbr, version_spec
 
 
 def _obs_add_remove_version_source(old_spec_version, new_spec_version):
@@ -209,7 +289,8 @@ if __name__ == '__main__':
             outfile = re.sub('\.j2$', '', os.path.basename(input_filename))
 
         # get the version *before* we run renderspec
-        old_spec_version = _get_spec_version(outfile)
+        old_version_pbr, old_version_spec = _get_version(
+            args['input_template'], outfile)
 
         cmd = ['renderspec', '--output', outfile,
                '--spec-style', args['spec_style']]
@@ -223,22 +304,30 @@ if __name__ == '__main__':
         subprocess.check_call(cmd)
 
         # get the version *after* we run renderspec
-        new_spec_version = _get_spec_version(outfile)
+        new_version_pbr, new_version_spec = _get_version(
+            args['input_template'], outfile)
 
         # check for changelog generation
         changes_file = outfile.replace('.spec', '.changes')
-        if old_spec_version != new_spec_version and \
+        if old_version_spec != new_version_spec and \
            os.path.exists(changes_file):
-            print("Version changed: '%s' -> '%s'"
-                  % (old_spec_version, new_spec_version))
-            changes = ['update to version %s' % new_spec_version]
-            changes_new_version = _get_changelog(
-                args['changelog_provider'], old_spec_version, new_spec_version)
+            print("Version changed: '%s (%s)' -> '%s (%s)'"
+                  % (old_version_spec, old_version_pbr,
+                     new_version_spec, new_version_pbr))
+            changes = ['update to version %s' % new_version_spec]
+            if old_version_pbr and new_version_pbr:
+                changes_new_version = _get_changelog(
+                    args['changelog_provider'],
+                    old_version_pbr, new_version_pbr)
+            else:
+                changes_new_version = _get_changelog(
+                    args['changelog_provider'],
+                    old_version_spec, new_version_spec)
             changes.append(changes_new_version)
             changes_str = _get_changes_string(changes, args['changelog_email'])
             print("Update %s" % (changes_file))
             _prepend_string_to_file(changes_str, changes_file)
             # remove/add old/new tarball from OBS
-            _obs_add_remove_version_source(old_spec_version, new_spec_version)
+            _obs_add_remove_version_source(old_version_spec, new_version_spec)
     finally:
         shutil.rmtree(tmpdir)
