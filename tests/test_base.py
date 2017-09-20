@@ -129,6 +129,28 @@ Mon Oct 17 05:22:25 UTC 2016 - foobar@example.com
             f.write('a line')
         sv._prepend_string_to_file('你好', fn)
 
+    def test__extract_archive_to_tempdir_no_file(self):
+        with self.assertRaises(Exception) as e_info:
+            with sv._extract_archive_to_tempdir("foobar"):
+                self.assertIn("foobar", str(e_info))
+
+    def _write_pbr_json(self, destdir, git_version='6119f6f'):
+        """write a pbr.json file into destdir"""
+        f1 = os.path.join(destdir, 'pbr.json')
+        with open(f1, 'w+') as f:
+            f.write('{"git_version": "%s", "is_release": false}' % git_version)
+
+    def test__find_pbr_json(self):
+        tmpdir = tempfile.mkdtemp(prefix='obs-service-renderspec-test_')
+        try:
+            self._write_pbr_json(tmpdir)
+            self.assertEqual(
+                sv._find_pbr_json(tmpdir),
+                os.path.join(tmpdir, 'pbr.json')
+            )
+        finally:
+            shutil.rmtree(tmpdir)
+
 
 if __name__ == '__main__':
     unittest.main()
