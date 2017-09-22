@@ -34,12 +34,29 @@ import tempfile
 import requests
 import zipfile
 from six.moves import filter
+import warnings
 
 
 RPMSPEC_BIN = "/usr/bin/rpmspec"
 OSC_BIN = "/usr/bin/osc"
 GITHUB_CHANGES = ("https://api.github.com/repos/%(owner)s/%(repo)s/"
                   "compare/%(v1)s...%(v2)s")
+OBS_SERVICE_DOWNLOAD_FILES = "/usr/lib/obs/service/download_files"
+
+
+def _download_files_source_service():
+    """call the download_files source service"""
+    cmd_download_files = [OBS_SERVICE_DOWNLOAD_FILES,
+                          '--outdir', '.']
+    if not os.path.exists(OBS_SERVICE_DOWNLOAD_FILES):
+        warnings.warn('%s not does not exist. Not calling.' % (
+            OBS_SERVICE_DOWNLOAD_FILES))
+        return
+    try:
+        subprocess.check_call(cmd_download_files)
+    except OSError as e:
+        warnings.warn('Can not call OBS source service '
+                      '"download_files": %s' % (e))
 
 
 @contextmanager
@@ -85,7 +102,7 @@ def _find_archives(directories, basename):
         [os.path.join(d, f) for d in directories if d for f in os.listdir(d)
          if f.startswith(basename) and
          f.endswith(('tar.gz', 'zip', 'tar.bz2', 'xz'))],
-        key=lambda x: os.stat(x).st_mtime, reverse=True)
+        key=lambda x: os.stat(x).st_ctime, reverse=True)
 
 
 def _get_changelog_github(owner, repo, v1, v2):
@@ -302,6 +319,10 @@ if __name__ == '__main__':
         cmd += [input_filename]
         # run renderspec
         subprocess.check_call(cmd)
+
+        # run download_files service (for getting the git sha from pbr.json, we
+        # need the new tarball. Otherwise we get the old version again)
+        _download_files_source_service()
 
         # get the version *after* we run renderspec
         new_version_pbr, new_version_spec = _get_version(
