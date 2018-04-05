@@ -34,6 +34,7 @@ import tempfile
 import requests
 import zipfile
 from six.moves import filter
+from six.moves.urllib.parse import urlparse
 import warnings
 
 
@@ -202,6 +203,10 @@ def _get_version(input_filename, output_filename):
     .spec file (or None) in a tuple"""
     version_pbr = None
     version_spec = None
+    # input_filename is the input_template parameter which might be something
+    # like https://example/monasca-ui.spec.j2?h=stable/pike
+    # we are just interested in the path
+    input_filename = urlparse(input_filename).path
     # 1) try to get the version from the tarball
     basename = re.sub('.spec.j2$', '', os.path.basename(input_filename))
     archives = _find_archives(['.'], basename)
