@@ -69,7 +69,15 @@ class RenderspecBaseTest(unittest.TestCase):
 
 
 class RenderspecBasics(RenderspecBaseTest):
-    def _write_template(self, name):
+    # patch1 content and corresponding sha256
+    P1_CONTENT = 'foo'
+    P1_SHA = '2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae'
+
+    def _write_patch(self, content, name):
+        with open(os.path.join(self._tmpdir, name), 'w+') as f:
+            f.write(content)
+
+    def _write_template(self, name, patches=[]):
         """write a template which can be rendered"""
         with open(os.path.join(self._tmpdir, name), 'w+') as f:
             f.write("""
@@ -78,10 +86,11 @@ License: Apache-2.0
 Version: 1.1.0
 Release: 0
 Summary: test summary
-Requires: {{ py2pkg("oslo.log") }}
+{patches}
+Requires: {{{{ py2pkg("oslo.log") }}}}
 %description
 test description.
-""")
+""".format(patches="\n".join(patches)))
 
     def test_help(self):
         self._run_renderspec(['-h'])
@@ -150,6 +159,89 @@ Mon Oct 17 05:22:25 UTC 2016 - foobar@example.com
             )
         finally:
             shutil.rmtree(tmpdir)
+
+    def test__get_patch_sha256_from_patchname(self):
+        patch_name = 'fix1.patch'
+        self._write_patch(RenderspecBasics.P1_CONTENT, patch_name)
+        sha = sv._get_patch_sha256_from_patchname(patch_name)
+        self.assertEqual(sha, RenderspecBasics.P1_SHA)
+
+    def test__get_patch_sha256_from_patchname_not_available(self):
+        """test when no patch file for the given name is available"""
+        sha = sv._get_patch_sha256_from_patchname('not-there-patch')
+        self.assertEqual(sha, None)
+
+    def test__get_patch_names_from_spec(self):
+        patches = ['Patch0:  fix1.patch',
+                   'Patch1:fix2.patch',
+                   'Patch100:        fix3.patch # comment',
+                   'Patch101:    fix4.patch']
+        # create template and render it so we can get patches from the .spec
+        self._write_template('template.spec.j2', patches=patches)
+        self._run_renderspec(['--input-template', 'template.spec.j2'])
+        patches = sv._get_patch_names_from_spec('template.spec')
+        self.assertEqual(patches, [
+            ('Patch0', 'fix1.patch'),
+            ('Patch1', 'fix2.patch'),
+            ('Patch100', 'fix3.patch'),
+            ('Patch101', 'fix4.patch'),
+        ])
+
+    def test__get_patches(self):
+        patch_name = 'fix1.patch'
+        self._write_patch(RenderspecBasics.P1_CONTENT, patch_name)
+        patches = ['Patch0: {}'.format(patch_name)]
+        self._write_template('template.spec.j2', patches=patches)
+        self._run_renderspec(['--input-template', 'template.spec.j2'])
+        p = sv._get_patches('template.spec')
+        self.assertEqual(p, {'fix1.patch': RenderspecBasics.P1_SHA})
+
+    def test__get_patches_changes_no_patches(self):
+        changes = sv._get_patches_changes({}, {})
+        self.assertEqual(changes, {'added': [], 'removed': [], 'updated': []})
+
+    def test__get_patches_changes_no_changes(self):
+        changes = sv._get_patches_changes(
+            {'fix1.patch': 'sha1111'},
+            {'fix1.patch': 'sha1111'}
+        )
+        self.assertEqual(changes, {'added': [], 'removed': [], 'updated': []})
+
+    def test__get_patches_changes_patch_added(self):
+        changes = sv._get_patches_changes(
+            {'fix1.patch': 'sha1111'},
+            {'fix1.patch': 'sha1111', 'fix2.patch': 'sha2222'}
+        )
+        self.assertEqual(changes, {'added': ['fix2.patch'],
+                                   'removed': [],
+                                   'updated': []})
+
+    def test__get_patches_changes_patch_removed(self):
+        changes = sv._get_patches_changes(
+            {'fix1.patch': 'sha1111', 'fix2.patch': 'sha2222'},
+            {'fix1.patch': 'sha1111'}
+        )
+        self.assertEqual(changes, {'added': [],
+                                   'removed': ['fix2.patch'],
+                                   'updated': []})
+
+    def test__get_patches_changelog_patch_added_and_removed(self):
+        changes = sv._get_patches_changes(
+            {'fix1.patch': 'sha1111'},
+            {'fix2.patch': 'sha2222'}
+        )
+        self.assertEqual(changes, {'added': ['fix2.patch'],
+                                   'removed': ['fix1.patch'],
+                                   'updated': []})
+
+    def test__get_patches_changes_patch_updated(self):
+        changes = sv._get_patches_changes(
+            {'fix1.patch': 'sha1111'},
+            {'fix1.patch': 'sha2222'}
+        )
+        self.assertEqual(changes, {'added': [],
+                                   'removed': [],
+                                   'updated': ['fix1.patch']})
 
 
 if __name__ == '__main__':

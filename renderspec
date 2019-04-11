@@ -21,6 +21,7 @@ import argparse
 from contextlib import closing
 from contextlib import contextmanager
 from datetime import datetime
+import hashlib
 import io
 import json
 import os
@@ -220,6 +221,70 @@ def _get_version(input_filename, output_filename):
     return version_pbr, version_spec
 
 
+def _get_patch_sha256_from_patchname(patch_name):
+    if not os.path.exists(patch_name):
+        return None
+    sha = hashlib.sha256()
+    with open(patch_name, mode='rb') as f:
+        sha.update(f.read())
+        return sha.hexdigest()
+
+
+def _get_patch_names_from_spec(specfile):
+    """get the available patch names from a given spec file"""
+    if not os.path.exists(specfile):
+        # maybe this is the initial convertion.
+        return []
+    with open(specfile, 'r') as sf:
+        content = sf.read()
+        matches = re.findall(r'^(Patch\d*):\s*([^\s]+)', content,
+                             re.MULTILINE | re.IGNORECASE)
+        return matches
+
+
+def _get_patches(specfile):
+    patch_names = _get_patch_names_from_spec(specfile)
+    patches = {}
+    for p_number, p_name in patch_names:
+        patches[p_name] = _get_patch_sha256_from_patchname(p_name)
+    return patches
+
+
+def _get_patches_changes(patches_old, patches_new):
+    patches_old_names = set(patches_old.keys())
+    patches_new_names = set(patches_new.keys())
+    changes = {}
+    # added
+    added = patches_new_names - patches_old_names
+    # removed
+    removed = patches_old_names - patches_new_names
+    # updated
+    updated = []
+    for p_name in (patches_old_names & patches_new_names):
+        if patches_old[p_name] != patches_new[p_name]:
+            updated.append(p_name)
+    changes['added'] = list(added)
+    changes['removed'] = list(removed)
+    changes['updated'] = updated
+    return changes
+
+
+def _obs_add_remove_patches(patch_changes):
+    if not os.path.exists(OSC_BIN) or not \
+       os.path.isdir(os.path.join(os.getcwd(), '.osc')):
+        return
+    for p in patch_changes['removed']:
+        osc_rm = [OSC_BIN, 'rm', '-f', p]
+        with open(os.devnull, 'w') as devnull:
+            subprocess.check_call(' '.join(osc_rm), stdout=devnull,
+                                  stderr=subprocess.STDOUT, shell=True)
+    for p in patch_changes['added']:
+        osc_add = [OSC_BIN, 'add', p]
+        with open(os.devnull, 'w') as devnull:
+            subprocess.check_call(' '.join(osc_add), stdout=devnull,
+                                  stderr=subprocess.STDOUT, shell=True)
+
+
 def _obs_add_remove_version_source(old_spec_version, new_spec_version):
     """after the spec was updated and if a new version is available, remove via
     'osc' the old tarball and add the new tarball"""
@@ -246,6 +311,18 @@ def download_file(url, dest):
             for chunk in r.iter_content(chunk_size=1024):
                 if chunk:
                     f.write(chunk)
+
+
+def _download_patches(input_template, patch_names):
+    if input_template.startswith('http'):
+        input_template_url = urlparse(input_template)
+        dirpath = os.path.dirname(input_template_url.path)
+        for p in patch_names:
+            # we assume that the patch is next to the input template
+            patch_path = os.path.join(dirpath, p[1])
+            patch_url = input_template_url._replace(path=patch_path)
+            download_file(patch_url.geturl(), p[1])
+            print('Downloaded patch {} ({})'.format(p[1], p[0]))
 
 
 def parse_args():
@@ -314,6 +391,9 @@ if __name__ == '__main__':
         old_version_pbr, old_version_spec = _get_version(
             args['input_template'], outfile)
 
+        # get the patches *before* we run renderspec
+        old_patches = _get_patches(outfile)
+
         cmd = ['renderspec', '--output', outfile,
                '--spec-style', args['spec_style']]
         if args['epochs']:
@@ -333,27 +413,53 @@ if __name__ == '__main__':
         new_version_pbr, new_version_spec = _get_version(
             args['input_template'], outfile)
 
+        # download patches
+        new_patches_names = _get_patch_names_from_spec(outfile)
+        _download_patches(args['input_template'], new_patches_names)
+
+        # get the patches *after* we run renderspec and downloaded the patches
+        new_patches = _get_patches(outfile)
+
         # check for changelog generation
         changes_file = outfile.replace('.spec', '.changes')
-        if old_version_spec != new_version_spec and \
-           os.path.exists(changes_file):
-            print("Version changed: '%s (%s)' -> '%s (%s)'"
-                  % (old_version_spec, old_version_pbr,
-                     new_version_spec, new_version_pbr))
-            changes = ['update to version %s' % new_version_spec]
-            if old_version_pbr and new_version_pbr:
-                changes_new_version = _get_changelog(
-                    args['changelog_provider'],
-                    old_version_pbr, new_version_pbr)
-            else:
-                changes_new_version = _get_changelog(
-                    args['changelog_provider'],
-                    old_version_spec, new_version_spec)
-            changes.append(changes_new_version)
-            changes_str = _get_changes_string(changes, args['changelog_email'])
-            print("Update %s" % (changes_file))
-            _prepend_string_to_file(changes_str, changes_file)
-            # remove/add old/new tarball from OBS
-            _obs_add_remove_version_source(old_version_spec, new_version_spec)
+        if os.path.exists(changes_file):
+            changes = []
+            # changes for patch add/remove/update
+            patch_changes = _get_patches_changes(old_patches, new_patches)
+            for p in patch_changes['added']:
+                changes.append('added {}'.format(p))
+            for p in patch_changes['removed']:
+                changes.append('removed {}'.format(p))
+            for p in patch_changes['updated']:
+                changes.append('updated {}'.format(p))
+
+            # changes for version update
+            if old_version_spec != new_version_spec:
+                print("Version changed: '%s (%s)' -> '%s (%s)'"
+                      % (old_version_spec, old_version_pbr,
+                         new_version_spec, new_version_pbr))
+                changes.append('update to version %s' % new_version_spec)
+                if old_version_pbr and new_version_pbr:
+                    changes_new_version = _get_changelog(
+                        args['changelog_provider'],
+                        old_version_pbr, new_version_pbr)
+                else:
+                    changes_new_version = _get_changelog(
+                        args['changelog_provider'],
+                        old_version_spec, new_version_spec)
+                changes.append(changes_new_version)
+            if changes:
+                changes_str = _get_changes_string(changes,
+                                                  args['changelog_email'])
+                print("Updated %s" % (changes_file))
+                _prepend_string_to_file(changes_str, changes_file)
+                # remove/add old/new tarball from OBS
+                _obs_add_remove_version_source(old_version_spec,
+                                               new_version_spec)
+                # remove/add patches from OBS
+                _obs_add_remove_patches(patch_changes)
+        else:
+            print('{} does not exist. Not generating any changes entries'.
+                  format(changes_file))
     finally:
         shutil.rmtree(tmpdir)
