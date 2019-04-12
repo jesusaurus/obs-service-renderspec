@@ -385,7 +385,7 @@ if __name__ == '__main__':
         if args['output_name']:
             outfile = args['output_name']
         else:
-            outfile = re.sub('\.j2$', '', os.path.basename(input_filename))
+            outfile = re.sub('\.j2$', '', os.path.basename(input_filename))  # noqa: W605,E501
 
         # get the version *before* we run renderspec
         old_version_pbr, old_version_spec = _get_version(
