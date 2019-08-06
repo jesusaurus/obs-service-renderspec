@@ -307,6 +307,8 @@ def _obs_add_remove_version_source(old_spec_version, new_spec_version):
 
 def download_file(url, dest):
     with closing(requests.get(url, stream=True)) as r:
+        if r.status_code != 200:
+            raise Exception("Can not get url '%s' (%s)" % (url, r.status_code))
         with open(dest, 'wb') as f:
             for chunk in r.iter_content(chunk_size=1024):
                 if chunk:
