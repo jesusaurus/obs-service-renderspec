@@ -291,6 +291,10 @@ def _obs_add_remove_version_source(old_spec_version, new_spec_version):
     if not os.path.exists(OSC_BIN) or not \
        os.path.isdir(os.path.join(os.getcwd(), '.osc')):
         return
+
+    if old_spec_version == new_spec_version:
+        return
+
     extensions = ['tar.gz,', 'zip', 'tar.bz2', 'xz']
     osc_rm = [OSC_BIN, 'rm', '-f', '*-%s.{%s}' % (old_spec_version,
                                                   ','.join(extensions))]
