@@ -199,16 +199,41 @@ def _get_version_from_spec(specfile):
     return list(set(filter(None, version.decode("utf-8").split('\n'))))[0]
 
 
+def _get_version_from_obsinfo(obsfile):
+    """get a single version from the given .obsinfo file"""
+
+    # This function was borrowed from obs-service-tar_scm
+    def read_from_obsinfo(filename, key):
+        infofile = open(filename, "r")
+        line = infofile.readline()
+        while line:
+            k = line.split(":", 1)
+            if k[0] == key:
+                return k[1].strip()
+            line = infofile.readline()
+        return None
+
+    if os.path.exists(obsfile):
+        obs_version = read_from_obsinfo(obsfile, 'version')
+        if obs_version:
+            return obs_version
+    return None
+
+
 def _get_version(input_filename, output_filename):
     """return the version from pbr (or None) and the version from the
     .spec file (or None) in a tuple"""
+    version_obs = None
     version_pbr = None
     version_spec = None
     # input_filename is the input_template parameter which might be something
     # like https://example/monasca-ui.spec.j2?h=stable/pike
     # we are just interested in the path
     input_filename = urlparse(input_filename).path
-    # 1) try to get the version from the tarball
+    # 1) try to get the version from obsinfo file
+    infofile = re.sub('.spec.j2$', '.obsinfo', os.path.basename(input_filename))
+    version_obs = _get_version_from_obsinfo(infofile)
+    # 2) try to get the version from the sdist tarball
     basename = re.sub('.spec.j2$', '', os.path.basename(input_filename))
     archives = _find_archives(['.'], basename)
     for archive in archives:
@@ -216,9 +241,9 @@ def _get_version(input_filename, output_filename):
         if version:
             version_pbr = version
             break
-    # 2) try to get version from spec
+    # 3) try to get version from spec
     version_spec = _get_version_from_spec(output_filename)
-    return version_pbr, version_spec
+    return version_obs, version_pbr, version_spec
 
 
 def _get_patch_sha256_from_patchname(patch_name):
@@ -394,8 +419,7 @@ if __name__ == '__main__':
             outfile = re.sub('\.j2$', '', os.path.basename(input_filename))  # noqa: W605,E501
 
         # get the version *before* we run renderspec
-        old_version_pbr, old_version_spec = _get_version(
-            args['input_template'], outfile)
+        old_versions = _get_version(args['input_template'], outfile)
 
         # get the patches *before* we run renderspec
         old_patches = _get_patches(outfile)
@@ -416,8 +440,7 @@ if __name__ == '__main__':
         _download_files_source_service()
 
         # get the version *after* we run renderspec
-        new_version_pbr, new_version_spec = _get_version(
-            args['input_template'], outfile)
+        new_versions = _get_version(args['input_template'], outfile)
 
         # download patches
         new_patches_names = _get_patch_names_from_spec(outfile)
@@ -440,20 +463,25 @@ if __name__ == '__main__':
                 changes.append('updated {}'.format(p))
 
             # changes for version update
-            if old_version_spec != new_version_spec:
-                print("Version changed: '%s (%s)' -> '%s (%s)'"
-                      % (old_version_spec, old_version_pbr,
-                         new_version_spec, new_version_pbr))
-                changes.append('update to version %s' % new_version_spec)
-                if old_version_pbr and new_version_pbr:
-                    changes_new_version = _get_changelog(
-                        args['changelog_provider'],
-                        old_version_pbr, new_version_pbr)
-                else:
-                    changes_new_version = _get_changelog(
-                        args['changelog_provider'],
-                        old_version_spec, new_version_spec)
+            if old_versions != new_versions:
+                print("Version changed: '%s' -> '%s'"
+                      % (old_versions, new_versions))
+                old_version = None
+                for _version in old_versions:
+                    if _version:
+                        old_version = _version
+                        break
+                new_version = None
+                for _version in new_versions:
+                    if _version:
+                        new_version = _version
+                        break
+                changes.append('update to version %s' % new_version)
+                changes_new_version = _get_changelog(
+                    args['changelog_provider'],
+                    old_version, new_version)
                 changes.append(changes_new_version)
+
             if changes:
                 changes_str = _get_changes_string(changes,
                                                   args['changelog_email'])
